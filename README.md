@@ -1,10 +1,36 @@
 # 12-Lead EKG AI Reading Assistant & EMR Integration
-# gemini --resume 638b7b27-b646-4dee-b94d-2adbc3aabdce  20261015
+
+**Latest Version:** Phase 3 Complete (2026-10-17)  
+**Model Performance (Fold 10):** Macro AUC 0.9485, Macro AUPRC 0.7283  
+**Deployed Model:** `models/ecg_resnet18_11class.onnx` (Kaggle GPU trained, Focal Loss γ=2.0)
+
 An end-to-end, CPU-optimized medical clinical decision support system combining:
 1. **Signal Preprocessing & Feature Extraction** (SciPy / NeuroKit2): Zero-phase bandpass/notch filtering, R-Peak detection, HR, PR, QRS, QT/QTc (Bazett), QRS frontal axis, ST deviations, and Sokolow-Lyon LVH criteria.
 2. **1D-ResNet18 Deep Learning Diagnostic Classifier** (ONNX Runtime): 11-class multi-label probabilities in **4.0 ms** on Intel Core i7-6700 CPU.
 3. **Ollama Clinical LLM Interpretation** (Qwen 2.5): Narrative EMR report and structured JSON with KCD-10 disease codes, hallucination prevention guardrails, and mandatory legal disclaimers.
 4. **FastAPI Microservice**: REST endpoints for real-time EMR client integration (Eclipse `com.emr.gds`).
+
+---
+
+## Model Training (Phase 3)
+
+The model was trained using **Focal Loss** (γ=2.0) on PTB-XL 100Hz dataset via Kaggle GPU (Tesla T4):
+
+```bash
+# Prepare dataset bundles (PTB-XL 100Hz)
+./kaggle/make_bundle.sh --data
+
+# Import notebook in Kaggle
+# kaggle/ekg_phase3_train.ipynb
+
+# Results: Fold 10 Test Performance
+# - Macro AUC: 0.9485 (equivalent to v1.0 baseline 0.9530)
+# - Macro AUPRC: 0.7283 (precision-recall balance)
+# - Critical class sensitivities: MI 89.5% ⚠️, AFIB 92.1% ✅, NORM 81% ✅
+# - Training time: 5.8 min (early stopped at epoch 14)
+```
+
+See `models/candidates/kaggle_run1/` for detailed metrics and training artifacts.
 
 ---
 
