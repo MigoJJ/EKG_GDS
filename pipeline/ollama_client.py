@@ -7,10 +7,11 @@ KCD-10 codes are assigned by rules, not by LLM, to prevent hallucination.
 
 from __future__ import annotations
 import json
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union, AsyncIterator
 import httpx
 from pipeline.config import OLLAMA_BASE_URL, OLLAMA_MODEL
 from pipeline.stemi_kcd_engine import get_primary_kcd_code
+from pipeline.template_engine import TemplateReportBuilder, HallucinationValidator
 
 
 MANDATORY_DISCLAIMER = (
@@ -247,3 +248,262 @@ class OllamaEKGClient:
                 "error": str(e),
                 "disclaimer": MANDATORY_DISCLAIMER
             }
+
+    def generate_combined_report(
+        self,
+        features: Dict[str, Any],
+        classification: Dict[str, Any],
+        patient_info: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[str, Dict[str, Any]]:
+        """
+        Phase 4: Single LLM call to generate both narrative and JSON.
+
+        Workflow:
+          1. Rule engine determines findings, KCD code, urgency (deterministic)
+          2. Template builder creates initial text and JSON structure
+          3. LLM refines wording (1 call, ~4 seconds instead of 8)
+          4. Validation checks for hallucinations
+          5. Returns (narrative_text, structured_json)
+
+        Returns:
+            (narrative_md, structured_json_dict)
+        """
+        # Step 1: Rule engine (deterministic)
+        primary_findings = classification.get("primary_findings", [])
+        mi_prob = classification.get("probabilities", {}).get("MI", 0.0)
+        stemi_suspected = features.get("stemi_suspected", False)
+        stemi_region = features.get("stemi_region")
+        wide_qrs = features.get("wide_qrs", False)
+        urgency = classification.get("clinical_urgency", "ROUTINE")
+
+        kcd_code, kcd_desc = get_primary_kcd_code(
+            primary_findings, stemi_suspected, stemi_region, mi_prob, wide_qrs
+        )
+
+        # Step 2: Template builder (deterministic)
+        narrative_template = TemplateReportBuilder.build_narrative_template(
+            features, classification, kcd_code, urgency
+        )
+        json_template = TemplateReportBuilder.build_json_template(
+            features, classification, kcd_code, urgency
+        )
+
+        # Step 3: LLM refinement (single call)
+        combined_prompt = f"""{narrative_template}
+
+[JSON 구조화 데이터]
+기본 리듬: {json_template.get('rhythm')}
+전도: {json_template.get('conduction')}
+형태: {json_template.get('morphology')}
+권고사항: {json_template.get('clinical_recommendation')}
+
+위의 템플릿 텍스트를 의료 전문가 수준의 한국어로 다듬고, 동일한 진단명과 응급도를 유지하면서
+더 자연스럽고 전문적인 표현으로 개선해주세요.
+새로운 진단명을 추가하거나 응급도를 변경하지 마세요.
+
+또한 다음 JSON 포맷으로 구조화된 데이터를 함께 생성해주세요:
+{{
+  "rhythm": "{json_template.get('rhythm')}",
+  "conduction": "{json_template.get('conduction')}",
+  "morphology": "위의 '주요 소견' 섹션의 개선된 텍스트",
+  "primary_diagnosis": "{json_template.get('primary_diagnosis')}",
+  "kcd_code": "{kcd_code}",
+  "urgency": "{urgency}",
+  "clinical_recommendation": "위의 '임상 권고사항' 섹션의 개선된 텍스트",
+  "confidence_note": "본 판독은 AI 보조 진단이며, 최종 진단은 담당 의사의 임상적 판단에 따릅니다."
+}}
+"""
+
+        payload = {
+            "model": self.model_name,
+            "system": SYSTEM_PROMPT_NARRATIVE,
+            "prompt": combined_prompt,
+            "stream": False,
+            "options": {
+                "temperature": 0.3,
+                "top_p": 0.9,
+                "num_predict": 500,  # Larger context for both narrative + JSON
+            }
+        }
+
+        try:
+            with httpx.Client(timeout=self.timeout) as client:
+                res = client.post(f"{self.base_url}/api/generate", json=payload)
+                res.raise_for_status()
+                data = res.json()
+                raw_response = data.get("response", "").strip()
+
+                # Split narrative and JSON
+                narrative_text = raw_response
+                json_part = "{}"
+
+                # Try to extract JSON block
+                if "{" in raw_response and "}" in raw_response:
+                    json_start = raw_response.rfind("{")
+                    json_end = raw_response.rfind("}") + 1
+                    if json_start < json_end:
+                        json_part = raw_response[json_start:json_end]
+                        narrative_text = raw_response[:json_start].strip()
+
+                # Parse JSON
+                try:
+                    parsed_json = json.loads(json_part)
+                except json.JSONDecodeError:
+                    parsed_json = json_template.copy()
+
+                # Step 4: Validation + Fallback
+                is_valid, error_msg = HallucinationValidator.validate_narrative(
+                    narrative_text, primary_findings, kcd_code, urgency
+                )
+                if not is_valid:
+                    narrative_text = HallucinationValidator.fallback_narrative(
+                        features, classification, kcd_code, urgency
+                    )
+
+                is_valid_json, error_msg_json = HallucinationValidator.validate_json(
+                    parsed_json, kcd_code, urgency
+                )
+                if not is_valid_json:
+                    parsed_json = HallucinationValidator.fallback_json(
+                        features, classification, kcd_code, urgency
+                    )
+
+                # Add disclaimer
+                if MANDATORY_DISCLAIMER not in narrative_text:
+                    narrative_text += f"\n\n---\n{MANDATORY_DISCLAIMER}"
+
+                parsed_json["disclaimer"] = MANDATORY_DISCLAIMER
+
+                return narrative_text, parsed_json
+
+        except Exception as e:
+            # Fallback to template on error
+            narrative_text = HallucinationValidator.fallback_narrative(
+                features, classification, kcd_code, urgency
+            )
+            parsed_json = HallucinationValidator.fallback_json(
+                features, classification, kcd_code, urgency
+            )
+            parsed_json["error"] = str(e)
+            return narrative_text, parsed_json
+
+    async def generate_combined_report_stream(
+        self,
+        features: Dict[str, Any],
+        classification: Dict[str, Any],
+        patient_info: Optional[Dict[str, Any]] = None,
+    ) -> AsyncIterator[str]:
+        """
+        Phase 4: Stream both narrative and JSON in real-time (SSE).
+
+        Yields:
+            JSON lines: {"type": "narrative" | "json", "content": str}
+        """
+        # Rule engine
+        primary_findings = classification.get("primary_findings", [])
+        mi_prob = classification.get("probabilities", {}).get("MI", 0.0)
+        stemi_suspected = features.get("stemi_suspected", False)
+        stemi_region = features.get("stemi_region")
+        wide_qrs = features.get("wide_qrs", False)
+        urgency = classification.get("clinical_urgency", "ROUTINE")
+
+        kcd_code, kcd_desc = get_primary_kcd_code(
+            primary_findings, stemi_suspected, stemi_region, mi_prob, wide_qrs
+        )
+
+        # Template
+        narrative_template = TemplateReportBuilder.build_narrative_template(
+            features, classification, kcd_code, urgency
+        )
+        json_template = TemplateReportBuilder.build_json_template(
+            features, classification, kcd_code, urgency
+        )
+
+        combined_prompt = f"""{narrative_template}
+
+[JSON 구조화 데이터]
+기본 리듬: {json_template.get('rhythm')}
+전도: {json_template.get('conduction')}
+형태: {json_template.get('morphology')}
+권고사항: {json_template.get('clinical_recommendation')}
+
+위의 템플릿 텍스트를 의료 전문가 수준의 한국어로 다듬고, 동일한 진단명과 응급도를 유지하면서
+더 자연스럽고 전문적인 표현으로 개선해주세요.
+"""
+
+        payload = {
+            "model": self.model_name,
+            "system": SYSTEM_PROMPT_NARRATIVE,
+            "prompt": combined_prompt,
+            "stream": True,
+            "options": {
+                "temperature": 0.3,
+                "top_p": 0.9,
+                "num_predict": 500,
+            }
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                async with client.stream("POST", f"{self.base_url}/api/generate", json=payload) as response:
+                    response.raise_for_status()
+
+                    # Stream narrative
+                    yield json.dumps({
+                        "type": "narrative_start",
+                        "content": f"## 심전도 판독\n\nKCD: {kcd_code} | 응급도: {urgency}\n\n"
+                    })
+
+                    accumulated = ""
+                    async for line in response.aiter_lines():
+                        if not line:
+                            continue
+                        try:
+                            chunk = json.loads(line)
+                            text = chunk.get("response", "")
+                            if text:
+                                accumulated += text
+                                yield json.dumps({
+                                    "type": "narrative_chunk",
+                                    "content": text
+                                })
+                        except json.JSONDecodeError:
+                            pass
+
+                    # Fallback or final JSON
+                    final_json = json_template.copy()
+                    final_json["kcd_code"] = kcd_code
+                    final_json["urgency"] = urgency
+                    final_json["disclaimer"] = MANDATORY_DISCLAIMER
+
+                    yield json.dumps({
+                        "type": "json",
+                        "content": final_json
+                    })
+
+                    yield json.dumps({
+                        "type": "complete",
+                        "content": "Report generation complete"
+                    })
+
+        except Exception as e:
+            fallback_narrative = HallucinationValidator.fallback_narrative(
+                features, classification, kcd_code, urgency
+            )
+            fallback_json = HallucinationValidator.fallback_json(
+                features, classification, kcd_code, urgency
+            )
+            fallback_json["error"] = str(e)
+
+            yield json.dumps({
+                "type": "error",
+                "content": f"Streaming error: {str(e)}"
+            })
+            yield json.dumps({
+                "type": "narrative",
+                "content": fallback_narrative
+            })
+            yield json.dumps({
+                "type": "json",
+                "content": fallback_json
+            })
