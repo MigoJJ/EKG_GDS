@@ -1061,3 +1061,140 @@ async def analyze_scp(
 
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"SCP-ECG parsing error: {str(e)}")
+
+
+# ============================================================================
+# Phase 4.5: ECG Image Input (PNG/JPEG from scanned paper)
+# ============================================================================
+
+from pipeline.ecg_image_parser import ECGImageParser
+
+
+@app.post("/api/v1/ecg/analyze-image", response_model=ECGAnalysisResponse, tags=["Analysis", "Phase 4.5"])
+async def analyze_ecg_image(
+    file: UploadFile = File(..., description="Scanned ECG image (PNG or JPEG)"),
+    patient_age: Optional[float] = Form(None, description="Patient age in years"),
+    patient_sex: Optional[str] = Form("M", description="Patient sex ('M' or 'F')"),
+    output_format: str = Form("narrative", description="Output format: 'narrative', 'json', 'both', or 'none'"),
+):
+    """
+    Analyze ECG from scanned paper image (PNG or JPEG).
+
+    Converts scanned ECG printouts to digital signal using image processing:
+    - Detects ECG grid (Hough transform)
+    - Extracts waveform curves (contour detection)
+    - Calibrates to standard (1mm = 0.1mV, 40mm/s)
+    - Returns complete analysis
+
+    Supports standard ECG paper formats (GE, Philips, Mortara).
+
+    Args:
+        file: Scanned ECG image (PNG or JPEG)
+        patient_age: Optional patient age
+        patient_sex: Patient sex ('M' or 'F')
+        output_format: Report format
+
+    Returns:
+        ECGAnalysisResponse with extracted signal and AI analysis
+    """
+    global classifier, extractor, ollama
+
+    if classifier is None or ollama is None or extractor is None:
+        raise HTTPException(status_code=503, detail="AI engine not ready")
+
+    try:
+        # Save uploaded file to temp
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+            content = await file.read()
+            tmp.write(content)
+            tmp_path = tmp.name
+
+        try:
+            # Parse ECG image
+            parser = ECGImageParser(tmp_path, dpi=300)
+
+            # Validate image quality
+            is_valid, error = parser.detect_image_quality()
+            if not is_valid:
+                raise ValueError(f"Image quality issue: {error}")
+
+            # Extract signal
+            signal = parser.extract_signal()
+            if signal is None:
+                raise ValueError("Failed to extract ECG signal from image")
+
+            # Ensure shape (samples, 12)
+            if signal.shape[0] == 12:
+                signal = signal.T
+
+            # Run analysis using existing pipeline
+            t_total_start = time.perf_counter()
+
+            # 1. Feature extraction
+            t0 = time.perf_counter()
+            feats = extractor.extract_features(
+                signal,
+                patient_sex=patient_sex or "M",
+                patient_age=patient_age
+            )
+            fe_latency = (time.perf_counter() - t0) * 1000.0
+
+            # 2. Deep learning classification
+            t0 = time.perf_counter()
+            cls_res = classifier.predict(
+                signal,
+                heart_axis_deg=feats.get("heart_axis_deg"),
+                stemi_suspected=feats.get("stemi_suspected", False),
+                stemi_region=feats.get("stemi_region")
+            )
+            dl_latency = (time.perf_counter() - t0) * 1000.0
+
+            # 3. Prepare patient info
+            patient_info = {
+                "age": patient_age,
+                "sex": patient_sex or "M",
+                "symptoms": "스캔 ECG 이미지 분석",
+                "image_source": file.filename
+            }
+
+            # 4. LLM report generation
+            narrative_report = None
+            structured_json = None
+            ollama_latency = 0.0
+
+            if output_format in ["narrative", "both"]:
+                t0 = time.perf_counter()
+                narrative_report = ollama.generate_narrative_report(feats, cls_res, patient_info)
+                ollama_latency += (time.perf_counter() - t0) * 1000.0
+
+            if output_format in ["json", "both"]:
+                t0 = time.perf_counter()
+                structured_json = ollama.generate_structured_json(feats, cls_res, patient_info)
+                ollama_latency += (time.perf_counter() - t0) * 1000.0
+
+            total_latency = (time.perf_counter() - t_total_start) * 1000.0
+
+            return ECGAnalysisResponse(
+                status="success",
+                patient_info=patient_info,
+                quantitative_features=FeatureExtractionResponse(**feats),
+                deep_learning_classification=ClassificationResponse(**cls_res),
+                ollama_narrative_report=narrative_report,
+                emr_structured_json=structured_json,
+                latency_ms={
+                    "feature_extraction_ms": round(fe_latency, 2),
+                    "dl_inference_ms": round(dl_latency, 2),
+                    "ollama_generation_ms": round(ollama_latency, 2),
+                    "total_ms": round(total_latency, 2),
+                },
+                disclaimer=MANDATORY_DISCLAIMER,
+            )
+
+        finally:
+            import os
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Image analysis error: {str(e)}")
