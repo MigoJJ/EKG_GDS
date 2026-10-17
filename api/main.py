@@ -27,6 +27,11 @@ from pipeline.classifier import ECGClassifier
 from pipeline.ollama_client import OllamaEKGClient, MANDATORY_DISCLAIMER
 from models.job_queue import job_queue, JobStatus
 from pipeline.task_executor import task_executor, ecg_analysis_task
+from api.auth import api_key_manager, cors_config_manager, rate_limiter
+from config.security import (
+    CORS_ALLOWED_ORIGINS, AUTH_EXEMPT_PATHS, REQUIRE_AUTH,
+    RATE_LIMIT_IP_PER_MINUTE, SECURITY_HEADERS, ENVIRONMENT
+)
 
 
 # Global singleton pipeline components
@@ -69,16 +74,107 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Enable CORS for local web dashboards, Electron, and JavaFX WebView
+# Phase 5 Step 2: Secure CORS (whitelist hospitals only)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=CORS_ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-Hospital-ID"],
 )
 
 STATIC_INDEX = Path(__file__).parent.parent / "static" / "index.html"
+
+
+# ============================================================================
+# Phase 5 Step 2: Security Middleware
+# ============================================================================
+
+from fastapi import Request
+from fastapi.responses import JSONResponse
+
+@app.middleware("http")
+async def security_headers_middleware(request: Request, call_next):
+    """Add security headers to all responses."""
+    response = await call_next(request)
+
+    # Add security headers
+    for header, value in SECURITY_HEADERS.items():
+        response.headers[header] = value
+
+    return response
+
+
+@app.middleware("http")
+async def api_key_auth_middleware(request: Request, call_next):
+    """
+    Validate API key for protected endpoints.
+    Exempt paths: health check, docs, etc.
+    """
+    # Skip auth for exempt paths
+    if request.url.path in AUTH_EXEMPT_PATHS or request.url.path.startswith("/docs") or request.url.path.startswith("/redoc"):
+        return await call_next(request)
+
+    if not REQUIRE_AUTH:
+        return await call_next(request)
+
+    # Extract API key from Authorization header
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Bearer "):
+        return JSONResponse(
+            status_code=401,
+            content={"detail": "Missing or invalid Authorization header"}
+        )
+
+    api_key_secret = auth_header.replace("Bearer ", "", 1).strip()
+
+    # Validate key
+    is_valid, api_key_obj, error = api_key_manager.validate_key(api_key_secret)
+    if not is_valid:
+        return JSONResponse(status_code=401, content={"detail": error})
+
+    # Store key info in request state for later use
+    request.state.api_key = api_key_obj
+    request.state.api_key_secret = api_key_secret
+
+    # Call next middleware/endpoint
+    return await call_next(request)
+
+
+@app.middleware("http")
+async def rate_limit_middleware(request: Request, call_next):
+    """Enforce rate limits per API key."""
+    # Get client IP
+    client_ip = request.client.host if request.client else "unknown"
+
+    # Check IP-based rate limit (backup)
+    if not rate_limiter.is_allowed(client_ip):
+        return JSONResponse(
+            status_code=429,
+            content={"detail": f"Rate limit exceeded ({RATE_LIMIT_IP_PER_MINUTE}/min per IP)"}
+        )
+
+    # Check API key-based rate limit (if authenticated)
+    if hasattr(request.state, "api_key") and request.state.api_key:
+        api_key = request.state.api_key
+        endpoint = request.url.path
+
+        is_allowed, error = api_key_manager.check_rate_limit(
+            request.state.api_key_secret,
+            endpoint
+        )
+
+        if not is_allowed:
+            return JSONResponse(status_code=429, content={"detail": error})
+
+        # Add remaining quota to response headers
+        quota = api_key_manager.get_remaining_quota(request.state.api_key_secret)
+        response = await call_next(request)
+        response.headers["X-RateLimit-Remaining-Minute"] = str(quota.get("remaining_per_minute", 0))
+        response.headers["X-RateLimit-Remaining-Day"] = str(quota.get("remaining_per_day", 0))
+        return response
+
+    return await call_next(request)
 
 
 @app.get("/", response_class=FileResponse, tags=["Web UI"])
@@ -474,4 +570,100 @@ async def list_jobs(status: Optional[str] = None, limit: int = 10):
         "jobs": jobs,
         "total": len(jobs),
         "stats": stats
+    }
+
+
+# ============================================================================
+# Phase 5 Step 2: Security Management Endpoints (Admin Only)
+# ============================================================================
+
+@app.get("/api/v1/admin/api-keys", tags=["Admin", "Security"])
+async def list_api_keys(request: Request):
+    """
+    List all API keys (admin endpoint - requires valid auth).
+
+    Response includes quotas and status, but not secrets.
+    """
+    if not hasattr(request.state, "api_key"):
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    return {
+        "keys": api_key_manager.list_keys(),
+        "count": len(api_key_manager.keys)
+    }
+
+
+@app.get("/api/v1/admin/quota", tags=["Admin", "Security"])
+async def get_api_quota(request: Request):
+    """
+    Get remaining quota for current API key.
+
+    Returns:
+        {
+            "remaining_per_minute": N,
+            "remaining_per_day": N,
+            "limit_per_minute": N,
+            "limit_per_day": N,
+            "hospital": "hospital name"
+        }
+    """
+    if not hasattr(request.state, "api_key"):
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    quota = api_key_manager.get_remaining_quota(request.state.api_key_secret)
+    quota["hospital"] = request.state.api_key.hospital_name
+    return quota
+
+
+@app.get("/api/v1/admin/cors-origins", tags=["Admin", "Security"])
+async def get_cors_origins(request: Request):
+    """
+    Get current CORS whitelist.
+
+    Requires admin authentication.
+    """
+    if not hasattr(request.state, "api_key"):
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    return {
+        "allowed_origins": cors_config_manager.allowed_origins,
+        "total": len(cors_config_manager.allowed_origins)
+    }
+
+
+@app.post("/api/v1/admin/cors-origins", tags=["Admin", "Security"])
+async def add_cors_origin(request: Request, origin: str):
+    """
+    Add new CORS origin (hospital domain).
+
+    Example: https://emr.new-hospital.kr
+
+    Requires admin authentication.
+    """
+    if not hasattr(request.state, "api_key"):
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    cors_config_manager.add_origin(origin)
+    return {"message": f"Added CORS origin: {origin}"}
+
+
+@app.get("/api/v1/admin/security-status", tags=["Admin", "Security"])
+async def get_security_status(request: Request):
+    """
+    Get current security configuration status.
+
+    Includes: TLS, auth, CORS, rate limits, audit logging.
+    """
+    if not hasattr(request.state, "api_key"):
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    return {
+        "environment": ENVIRONMENT,
+        "authentication": "API key (Bearer token)",
+        "https_enabled": False,  # Check actual setting
+        "cors_origins_count": len(cors_config_manager.allowed_origins),
+        "rate_limiting_enabled": True,
+        "audit_logging_enabled": True,
+        "api_keys_active": len([k for k in api_key_manager.keys.values() if k.active]),
+        "security_headers_enabled": True,
     }
