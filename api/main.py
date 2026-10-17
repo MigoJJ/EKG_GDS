@@ -25,6 +25,8 @@ from pipeline.ptbxl_loader import PTBXLLoader
 from pipeline.feature_extractor import ECGFeatureExtractor
 from pipeline.classifier import ECGClassifier
 from pipeline.ollama_client import OllamaEKGClient, MANDATORY_DISCLAIMER
+from models.job_queue import job_queue, JobStatus
+from pipeline.task_executor import task_executor, ecg_analysis_task
 
 
 # Global singleton pipeline components
@@ -313,3 +315,163 @@ async def analyze_ecg_streaming(request: ECGAnalysisRequest):
             yield f"data: {error_json}\n\n"
 
     return StreamingResponse(generate(), media_type="text/event-stream")
+
+
+# ============================================================================
+# Phase 5: Asynchronous Analysis (Non-blocking LLM)
+# ============================================================================
+
+@app.post("/api/v1/ecg/analyze-async", tags=["Analysis", "Phase 5"])
+async def analyze_ecg_async(request: ECGAnalysisRequest):
+    """
+    Phase 5: Non-blocking ECG analysis with background LLM report generation.
+
+    Returns immediately with job_id. Client polls GET /api/v1/jobs/{job_id}
+    for progress and results.
+
+    Benefits:
+    - UI doesn't block waiting for LLM (~4 seconds)
+    - Doctor can submit multiple ECGs without waiting
+    - Real-time progress visualization (0–100%)
+    - Cancel long-running jobs if needed
+
+    Returns:
+        {
+            "job_id": "abc123def456",
+            "status": "queued",
+            "created_at": "2026-10-17T12:34:56Z"
+        }
+    """
+    if classifier is None or ollama is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="ONNX classifier or Ollama service not initialized"
+        )
+
+    # Parse signal
+    if request.ecg_id is not None and loader is not None:
+        record = loader.load_record(request.ecg_id)
+        sig = record["signal"].astype(np.float32)
+        patient_info = record.get("metadata", {})
+    else:
+        if not request.signal_12lead or len(request.signal_12lead) == 0:
+            raise HTTPException(status_code=400, detail="ECG signal required")
+        sig = np.array(request.signal_12lead, dtype=np.float32)
+        if sig.shape != (1000, 12):
+            sig = np.transpose(sig) if sig.shape == (12, 1000) else sig
+        patient_info = request.patient_info or {}
+
+    # Feature extraction (fast, synchronous)
+    feats = extractor.extract(sig, sampling_rate=100)
+
+    # Classification (fast, synchronous)
+    cls_res = classifier.predict(
+        sig,
+        heart_axis_deg=feats.get("heart_axis_deg"),
+        stemi_suspected=feats.get("stemi_suspected", False),
+        stemi_region=feats.get("stemi_region")
+    )
+
+    # Create job and submit to background task
+    job_id = job_queue.create_job()
+
+    task_executor.submit_task(
+        job_id,
+        ecg_analysis_task,
+        features=feats,
+        classification=cls_res,
+        patient_info=patient_info,
+        ollama_client=ollama,
+        job_queue=job_queue
+    )
+
+    return {
+        "job_id": job_id,
+        "status": "queued",
+        "created_at": time.time(),
+        "message": f"Analysis job {job_id} queued. Poll GET /api/v1/jobs/{job_id} for progress."
+    }
+
+
+@app.get("/api/v1/jobs/{job_id}", tags=["Jobs", "Phase 5"])
+async def get_job_status(job_id: str):
+    """
+    Query status and progress of a background analysis job.
+
+    Returns:
+        {
+            "job_id": "abc123",
+            "status": "in_progress" | "complete" | "failed",
+            "progress": 0–100,
+            "result": {...} if complete,
+            "error": "..." if failed
+        }
+    """
+    job = job_queue.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+
+    response = job.to_dict()
+
+    # Remove internal timestamps for simpler API
+    response.pop("created_at", None)
+    response.pop("started_at", None)
+    response.pop("completed_at", None)
+
+    return response
+
+
+@app.delete("/api/v1/jobs/{job_id}", tags=["Jobs", "Phase 5"])
+async def cancel_job(job_id: str):
+    """
+    Cancel a queued or in-progress analysis job.
+
+    Returns:
+        {"job_id": "abc123", "status": "cancelled"}
+    """
+    job = job_queue.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+
+    if job_queue.cancel_job(job_id):
+        return {"job_id": job_id, "status": "cancelled"}
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot cancel job in state {job.status.value}"
+        )
+
+
+@app.get("/api/v1/jobs", tags=["Jobs", "Phase 5"])
+async def list_jobs(status: Optional[str] = None, limit: int = 10):
+    """
+    List recent analysis jobs, optionally filtered by status.
+
+    Query params:
+        status: "queued", "in_progress", "complete", "failed", "cancelled" (optional)
+        limit: Max jobs to return (default 10, max 100)
+
+    Returns:
+        {
+            "jobs": [...],
+            "total": N,
+            "stats": {"queued": N, "in_progress": N, ...}
+        }
+    """
+    limit = min(limit, 100)  # Cap at 100
+
+    status_enum = None
+    if status:
+        try:
+            status_enum = JobStatus(status)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Invalid status: {status}")
+
+    jobs = job_queue.list_jobs(status=status_enum, limit=limit)
+    stats = job_queue.get_stats()
+
+    return {
+        "jobs": jobs,
+        "total": len(jobs),
+        "stats": stats
+    }
