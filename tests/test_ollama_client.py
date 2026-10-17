@@ -8,7 +8,7 @@ from pipeline.ollama_client import OllamaEKGClient, MANDATORY_DISCLAIMER
 
 @pytest.fixture(scope="module")
 def client():
-    return OllamaEKGClient(model_name="qwen2.5:3b", timeout=60.0)
+    return OllamaEKGClient(timeout=60.0)
 
 
 @pytest.fixture

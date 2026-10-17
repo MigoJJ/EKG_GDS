@@ -12,6 +12,7 @@ import torch.nn as nn
 from torch.utils.data import TensorDataset, DataLoader
 import onnx
 
+from pipeline.config import ONNX_MODEL_PATH, TORCH_WEIGHTS_PATH
 from pipeline.ptbxl_loader import PTBXLLoader, DIAGNOSTIC_CLASSES
 from models.export_onnx import ECGResNet1D
 
@@ -83,8 +84,8 @@ def run_in_memory_training(epochs: int = 12, batch_size: int = 64, lr: float = 1
         return loss.mean()
 
     best_val_loss = float("inf")
-    best_weights_path = Path("/home/migowj/ekg-assistant/models/best_ecg_resnet18.pt")
-    onnx_output_path = Path("/home/migowj/ekg-assistant/models/ecg_resnet18_11class.onnx")
+    best_weights_path = TORCH_WEIGHTS_PATH
+    onnx_output_path = ONNX_MODEL_PATH
 
     # 3. Training Loop
     print("Starting training epochs...")

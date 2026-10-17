@@ -18,7 +18,7 @@ def run_pipeline(ecg_id: int):
     loader = PTBXLLoader()
     extractor = ECGFeatureExtractor(sampling_rate=100)
     classifier = ECGClassifier()
-    ollama = OllamaEKGClient(model_name="qwen2.5:3b")
+    ollama = OllamaEKGClient()
 
     # 1. Load Raw ECG
     rec = loader.get_record(ecg_id, sampling_rate=100)

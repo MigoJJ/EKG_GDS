@@ -10,6 +10,8 @@ import onnx
 import onnxruntime as ort
 import numpy as np
 
+from pipeline.config import ONNX_MODEL_PATH
+
 
 class ConvBlock1D(nn.Module):
     def __init__(self, in_channels: int, out_channels: int, kernel_size: int = 7, stride: int = 1):
@@ -84,7 +86,7 @@ class ECGResNet1D(nn.Module):
         return probs
 
 
-def export_model_to_onnx(output_path: str = "/home/migowj/ekg-assistant/models/ecg_resnet18_11class.onnx"):
+def export_model_to_onnx(output_path: str = str(ONNX_MODEL_PATH)):
     out_file = Path(output_path)
     out_file.parent.mkdir(parents=True, exist_ok=True)
 

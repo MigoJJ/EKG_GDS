@@ -53,7 +53,7 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"[Error] Failed to initialize ONNX classifier: {e}")
 
-    ollama = OllamaEKGClient(model_name="qwen2.5:3b")
+    ollama = OllamaEKGClient()
     print("[Startup] All components initialized successfully.")
     yield
     print("[Shutdown] Cleaning up resources.")

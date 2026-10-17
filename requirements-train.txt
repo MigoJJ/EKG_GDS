@@ -1,0 +1,4 @@
+# EKG Reading Assistant - Model Training & ONNX Export Dependencies
+# Install on top of requirements.txt: pip install -r requirements.txt -r requirements-train.txt
+torch>=2.2.0
+onnx>=1.16.0

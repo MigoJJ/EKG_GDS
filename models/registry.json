@@ -1,0 +1,37 @@
+{
+  "active_model": "ecg_resnet18_11class_v1",
+  "models": {
+    "ecg_resnet18_11class_v1": {
+      "created_at": "2026-10-15T23:34:29+09:00",
+      "architecture": "ECGResNet1D (models/export_onnx.py), 1D-ResNet18",
+      "input": {"name": "ecg_signal", "shape": ["batch_size", 12, 1000], "sampling_rate_hz": 100, "duration_sec": 10, "normalization": "per-lead z-score"},
+      "output": {"name": "probabilities", "shape": ["batch_size", 11], "activation": "sigmoid"},
+      "classes": ["NORM", "MI", "AFIB", "PVC", "PAC", "1AVB", "RBBB", "LBBB", "LAFB", "LVH", "STTC"],
+      "artifacts": {
+        "onnx": {"path": "ecg_resnet18_11class.onnx", "sha256": "af741eacacdd2c4b5bcdfff3b1b81ea8a3124f025997516ba2231f394e32ed44"},
+        "torch_weights": {"path": "best_ecg_resnet18.pt", "sha256": "134563b456ce8052ba33d65bcde04bf4339b87718e479c33dd1657dc9e379b0c"},
+        "cutoffs": {"path": "clinical_cutoffs.json", "version": "1.2.0", "sha256": "cf5bb482e70c3a85f1514f6b07e46c34a59f96f772d3fde43917cfbd8430aa8b"}
+      },
+      "training": {
+        "script": "train_in_memory.py (inferred from file timestamps and default hyperparameters; not recorded at training time)",
+        "dataset": "PTB-XL 100Hz (filename_lr)",
+        "train_split": "strat_fold 1-8",
+        "val_split": "strat_fold 9 (checkpoint selection by val loss, cutoff tuning)",
+        "test_split": "strat_fold 10",
+        "epochs": 12,
+        "batch_size": 64,
+        "optimizer": "AdamW (lr=1.5e-3, weight_decay=1e-4), CosineAnnealingLR",
+        "loss": "BCE",
+        "augmentation": "none"
+      },
+      "performance_fold10": {
+        "macro_auc": 0.953,
+        "macro_sensitivity": 0.856,
+        "macro_specificity": 0.903,
+        "macro_ppv": 0.591,
+        "macro_npv": 0.976,
+        "source": "clinical_cutoffs.json performance_fold10"
+      }
+    }
+  }
+}

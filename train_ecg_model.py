@@ -12,6 +12,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 
+from pipeline.config import TORCH_WEIGHTS_PATH
 from pipeline.ptbxl_loader import PTBXLLoader, DIAGNOSTIC_CLASSES
 from models.export_onnx import ECGResNet1D
 
@@ -69,7 +70,7 @@ def train_model(epochs: int = 5, batch_size: int = 32, lr: float = 1e-3, device_
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
 
     best_val_loss = float("inf")
-    save_path = Path("/home/migowj/ekg-assistant/models/best_ecg_resnet18.pt")
+    save_path = TORCH_WEIGHTS_PATH
     save_path.parent.mkdir(parents=True, exist_ok=True)
 
     for epoch in range(1, epochs + 1):

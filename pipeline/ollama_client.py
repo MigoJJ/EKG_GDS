@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List, Optional, Tuple, Union
 import httpx
+from pipeline.config import OLLAMA_BASE_URL, OLLAMA_MODEL
 
 
 MANDATORY_DISCLAIMER = (
@@ -66,8 +67,8 @@ class OllamaEKGClient:
 
     def __init__(
         self,
-        base_url: str = "http://localhost:11434",
-        model_name: str = "qwen2.5:3b",
+        base_url: str = OLLAMA_BASE_URL,
+        model_name: str = OLLAMA_MODEL,
         timeout: float = 90.0,
     ):
         self.base_url = base_url.rstrip("/")

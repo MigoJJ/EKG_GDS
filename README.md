@@ -23,7 +23,24 @@ cd /home/migowj/ekg-assistant
 cd /home/migowj/ekg-assistant
 PYTHONPATH=. .venv/bin/pytest tests/ -v
 ```
-*(All 24 unit & integration tests pass with 100% success)*
+*(33 passed, 3 xfailed — the xfailed tests in `tests/test_stemi_safety.py` document known STEMI-criteria defects scheduled for Phase 1 of [upgrade20261016.md](upgrade20261016.md))*
+
+### Configuration
+Paths and services are defined in `pipeline/config.py` and default to locations inside the project. Override with environment variables:
+
+| Variable | Default |
+| :--- | :--- |
+| `EKG_MODELS_DIR` | `models/` |
+| `EKG_ONNX_MODEL` | `models/ecg_resnet18_11class.onnx` |
+| `EKG_TORCH_WEIGHTS` | `models/best_ecg_resnet18.pt` |
+| `EKG_CUTOFFS` | `models/clinical_cutoffs.json` |
+| `EKG_PTBXL_DIR` | `data/ptb-xl` |
+| `EKG_OLLAMA_URL` | `http://localhost:11434` |
+| `EKG_OLLAMA_MODEL` | `qwen2.5:3b` |
+
+Model artifacts and their SHA-256 hashes are recorded in `models/registry.json`; `tests/test_model_registry.py` fails if a model file changes without a registry update. Model weights are not tracked in git.
+
+Training dependencies (PyTorch, ONNX) are separate: `pip install -r requirements.txt -r requirements-train.txt`
 
 ### 3. Run Demos
 ```bash

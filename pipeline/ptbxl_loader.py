@@ -10,6 +10,7 @@ from typing import Dict, List, Optional, Tuple, Union
 import numpy as np
 import pandas as pd
 import wfdb
+from pipeline.config import PTBXL_DIR
 
 
 # 11-Class Diagnostic Taxonomy for Clinical ECG
@@ -61,7 +62,7 @@ STANDARD_12_LEADS = ["I", "II", "III", "AVR", "AVL", "AVF", "V1", "V2", "V3", "V
 class PTBXLLoader:
     """Loader and preprocessor for the PTB-XL 12-lead ECG database."""
 
-    def __init__(self, data_dir: Union[str, Path] = "/home/migowj/ekg-assistant/data/ptb-xl"):
+    def __init__(self, data_dir: Union[str, Path] = PTBXL_DIR):
         self.data_dir = Path(data_dir)
         self.csv_path = self.data_dir / "ptbxl_database.csv"
         self.scp_path = self.data_dir / "scp_statements.csv"

@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 import numpy as np
 import onnxruntime as ort
+from pipeline.config import CUTOFFS_PATH, ONNX_MODEL_PATH
 from pipeline.ptbxl_loader import DIAGNOSTIC_CLASSES
 
 
@@ -30,7 +31,7 @@ DEFAULT_THRESHOLDS = {
 def get_clinical_cutoffs() -> Dict[str, float]:
     """Loads cut-offs from models/clinical_cutoffs.json if available, else defaults."""
     import json
-    cfg_file = Path(__file__).parent.parent / "models" / "clinical_cutoffs.json"
+    cfg_file = CUTOFFS_PATH
     if cfg_file.exists():
         try:
             with open(cfg_file, "r", encoding="utf-8") as f:
@@ -46,7 +47,7 @@ class ECGClassifier:
 
     def __init__(
         self,
-        model_path: Union[str, Path] = "/home/migowj/ekg-assistant/models/ecg_resnet18_11class.onnx",
+        model_path: Union[str, Path] = ONNX_MODEL_PATH,
         thresholds: Optional[Dict[str, float]] = None,
         num_threads: int = 4,
     ):

@@ -16,7 +16,7 @@ echo " Starting 12-Lead EKG AI Reading Assistant API Service"
 echo " Host   : 0.0.0.0:8000"
 echo " Docs   : http://localhost:8000/docs (Swagger UI)"
 echo " Health : http://localhost:8000/api/v1/health"
-echo " Ollama : http://localhost:11434"
+echo " Ollama : ${EKG_OLLAMA_URL:-http://localhost:11434} (${EKG_OLLAMA_MODEL:-qwen2.5:3b})"
 echo "=================================================================="
 
 exec uvicorn api.main:app --host 0.0.0.0 --port 8000 --workers 1 --log-level info
