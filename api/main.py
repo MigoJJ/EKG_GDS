@@ -201,7 +201,12 @@ async def analyze_ecg(request: ECGAnalysisRequest):
 
     # 2. Deep learning classification (with LAFB Hybrid OR Rule enabled)
     t0 = time.perf_counter()
-    cls_res = classifier.predict(sig, heart_axis_deg=feats.get("heart_axis_deg"))
+    cls_res = classifier.predict(
+        sig,
+        heart_axis_deg=feats.get("heart_axis_deg"),
+        stemi_suspected=feats.get("stemi_suspected", False),
+        stemi_region=feats.get("stemi_region")
+    )
     dl_latency = (time.perf_counter() - t0) * 1000.0
 
     # 3. Ollama clinical report generation

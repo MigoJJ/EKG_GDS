@@ -49,16 +49,16 @@ def test_female_v2_v3_above_threshold_is_stemi(extractor, monkeypatch):
     assert _stemi_flag(extractor, monkeypatch, {"V2": 0.16, "V3": 0.16}, sex="F", age=60) is True
 
 
-@pytest.mark.xfail(strict=True, reason="Phase 1: female V2-V3 threshold is 0.10 mV, should be 0.15 mV")
 def test_female_v2_v3_below_threshold_is_not_stemi(extractor, monkeypatch):
+    """Female V2-V3 threshold correctly set to 0.15 mV (not 0.10 mV)."""
     assert _stemi_flag(extractor, monkeypatch, {"V2": 0.12, "V3": 0.12}, sex="F", age=60) is False
 
 
-@pytest.mark.xfail(strict=True, reason="Phase 1: men <40 need >=0.25 mV in V2-V3; age is not used")
 def test_male_under_40_v2_v3_below_threshold_is_not_stemi(extractor, monkeypatch):
+    """Men <40 require >=0.25 mV in V2-V3 (not 0.20 mV), age is used."""
     assert _stemi_flag(extractor, monkeypatch, {"V2": 0.22, "V3": 0.22}, sex="M", age=35) is False
 
 
-@pytest.mark.xfail(strict=True, reason="Phase 1: contiguity is not checked; any 2 leads trigger STEMI")
 def test_non_contiguous_elevation_is_not_stemi(extractor, monkeypatch):
+    """Non-contiguous elevation (III + V5) is not STEMI; requires anatomical contiguity."""
     assert _stemi_flag(extractor, monkeypatch, {"III": 0.12, "V5": 0.12}, sex="M", age=60) is False

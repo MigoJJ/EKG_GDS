@@ -103,6 +103,8 @@ class ECGClassifier:
         self,
         raw_signal: np.ndarray,
         heart_axis_deg: Optional[float] = None,
+        stemi_suspected: bool = False,
+        stemi_region: Optional[str] = None,
         return_top_k: int = 3
     ) -> Dict[str, Union[Dict[str, float], Dict[str, bool], List[Tuple[str, float]], List[str], str]]:
         """
@@ -152,13 +154,15 @@ class ECGClassifier:
         sorted_probs = sorted(probs_dict.items(), key=lambda item: item[1], reverse=True)
         top_k = sorted_probs[:return_top_k]
 
-        # 4) Clinical Risk Stratification: MI -> EMERGENCY 유지
-        if preds_dict.get("MI", False):
+        # 4) Clinical Risk Stratification: separate STEMI from other MI
+        # EMERGENCY: STEMI criteria met on ECG (ST elevation with contiguity)
+        if stemi_suspected:
             urgency = "EMERGENCY"
-        elif preds_dict.get("AFIB", False) or preds_dict.get("LBBB", False):
+        # URGENT: DL predicts MI but no STEMI on ECG (likely NSTEMI or old MI)
+        # Also URGENT: AFIB or LBBB (high-risk conduction abnormality)
+        elif preds_dict.get("MI", False) or preds_dict.get("AFIB", False) or preds_dict.get("LBBB", False):
             urgency = "URGENT"
-        elif preds_dict.get("NORM", False) and len(primary_findings) == 0:
-            urgency = "ROUTINE (NORMAL)"
+        # ROUTINE: normal ECG or minor findings (includes NORM)
         else:
             urgency = "ROUTINE"
 

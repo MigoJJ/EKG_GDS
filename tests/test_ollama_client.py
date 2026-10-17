@@ -34,7 +34,9 @@ def sample_data():
     }
     classification = {
         "top_findings": [("NORM", 0.92), ("STTC", 0.05), ("MI", 0.02)],
-        "clinical_urgency": "ROUTINE (NORMAL)",
+        "primary_findings": [],
+        "probabilities": {"MI": 0.02, "NORM": 0.92},
+        "clinical_urgency": "ROUTINE",
     }
     patient = {"age": 55, "sex": "M", "symptoms": "건강검진"}
     return features, classification, patient
@@ -56,7 +58,7 @@ def test_prompt_construction(client, sample_data):
     assert "160.0 ms" in prompt
     assert "421.8 ms" in prompt
     assert "NORM (92.0%)" in prompt
-    assert "ROUTINE (NORMAL)" in prompt
+    assert "ROUTINE" in prompt
 
 
 def test_mandatory_disclaimer_constant():

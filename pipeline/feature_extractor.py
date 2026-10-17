@@ -10,6 +10,7 @@ from typing import Dict, List, Optional, Tuple, Union
 import numpy as np
 from scipy import signal
 from pipeline.preprocessor import ECGPreprocessor
+from pipeline.stemi_kcd_engine import get_ste_threshold, detect_stemi_region
 
 
 LEAD_INDICES = {
@@ -116,17 +117,20 @@ class ECGFeatureExtractor:
         lvh_voltage_criteria = sokolow_lyon_mv >= 3.5
 
         # 6. High-Priority Clinical Findings Detection
-        # Check STEMI criteria: ST elevation in >=2 contiguous leads (V1-V3: >0.2mV for M, >0.15 for F; other leads >0.1mV)
+        # Check STEMI criteria using Fourth Universal Definition of MI thresholds
         st_elevation_leads = []
         st_depression_leads = []
         for lead, dev in st_deviations.items():
-            threshold_ste = 0.20 if (lead in ["V1", "V2", "V3"] and patient_sex == "M") else 0.10
+            threshold_ste = get_ste_threshold(lead, patient_sex=patient_sex, patient_age=patient_age)
             if dev >= threshold_ste:
                 st_elevation_leads.append(lead)
             elif dev <= -0.10:
                 st_depression_leads.append(lead)
 
-        stemi_suspected = len(st_elevation_leads) >= 2
+        # Detect STEMI region (applies contiguity rules)
+        stemi_suspected, stemi_region, stemi_metrics = detect_stemi_region(
+            st_deviations, st_elevation_leads, patient_sex=patient_sex, patient_age=patient_age
+        )
         wide_qrs = qrs_dur_ms >= 120.0
         prolonged_pr = pr_interval_ms >= 200.0
         prolonged_qtc = qtc_ms >= (460.0 if patient_sex == "F" else 450.0)
@@ -146,6 +150,8 @@ class ECGFeatureExtractor:
             "st_elevation_leads": st_elevation_leads,
             "st_depression_leads": st_depression_leads,
             "stemi_suspected": stemi_suspected,
+            "stemi_region": stemi_region,
+            "stemi_metrics": stemi_metrics,
             "wide_qrs": wide_qrs,
             "prolonged_pr": prolonged_pr,
             "prolonged_qtc": prolonged_qtc,

@@ -2,6 +2,7 @@
 Ollama EKG Clinical Interpretation Client Module
 Builds structured clinical prompts from ECG features and deep learning probabilities,
 enforces medical hallucination guardrails, and calls local Ollama models (Qwen 2.5).
+KCD-10 codes are assigned by rules, not by LLM, to prevent hallucination.
 """
 
 from __future__ import annotations
@@ -9,6 +10,7 @@ import json
 from typing import Any, Dict, List, Optional, Tuple, Union
 import httpx
 from pipeline.config import OLLAMA_BASE_URL, OLLAMA_MODEL
+from pipeline.stemi_kcd_engine import get_primary_kcd_code
 
 
 MANDATORY_DISCLAIMER = (
@@ -137,8 +139,24 @@ class OllamaEKGClient:
         classification: Dict[str, Any],
         patient_info: Optional[Dict[str, Any]] = None,
     ) -> str:
-        """Calls Ollama to generate a formal Korean narrative EMR interpretation report."""
+        """Calls Ollama to generate a formal Korean narrative EMR interpretation report.
+        KCD code is determined by rule engine, not LLM, to prevent hallucination."""
+
+        # Determine KCD code and urgency by rules
+        primary_findings = classification.get("primary_findings", [])
+        mi_prob = classification.get("probabilities", {}).get("MI", 0.0)
+        stemi_suspected = features.get("stemi_suspected", False)
+        stemi_region = features.get("stemi_region")
+        wide_qrs = features.get("wide_qrs", False)
+        urgency = classification.get("clinical_urgency", "ROUTINE")
+
+        kcd_code, kcd_desc = get_primary_kcd_code(
+            primary_findings, stemi_suspected, stemi_region, mi_prob, wide_qrs
+        )
+
+        # Inject KCD code into prompt
         user_prompt = self.build_clinical_prompt(features, classification, patient_info)
+        user_prompt += f"\n\n[규칙 기반 진단 코드]\nKCD-10: {kcd_code}\n설명: {kcd_desc}\n응급도: {urgency}"
 
         payload = {
             "model": self.model_name,
@@ -148,7 +166,7 @@ class OllamaEKGClient:
             "options": {
                 "temperature": 0.2,  # Low temperature to suppress hallucinations
                 "top_p": 0.9,
-                "num_predict": 280,  # Keeps output concise and finishes in ~15-20s on CPU
+                "num_predict": 300,  # Slightly increased for KCD info and urgency
             }
         }
 
@@ -167,7 +185,9 @@ class OllamaEKGClient:
         except Exception as e:
             return (
                 f"### [오류] Ollama 판독 보고서 생성 실패\n"
-                f"내용: {str(e)}\n\n"
+                f"내용: {str(e)}\n"
+                f"KCD-10: {kcd_code}\n"
+                f"응급도: {urgency}\n\n"
                 f"---\n{MANDATORY_DISCLAIMER}"
             )
 
@@ -177,8 +197,24 @@ class OllamaEKGClient:
         classification: Dict[str, Any],
         patient_info: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """Calls Ollama with JSON mode to produce an EMR-ready structured payload."""
+        """Calls Ollama with JSON mode to produce an EMR-ready structured payload.
+        KCD code is determined by rule engine, not LLM, to prevent hallucination."""
+
+        # Determine KCD code and urgency by rules
+        primary_findings = classification.get("primary_findings", [])
+        mi_prob = classification.get("probabilities", {}).get("MI", 0.0)
+        stemi_suspected = features.get("stemi_suspected", False)
+        stemi_region = features.get("stemi_region")
+        wide_qrs = features.get("wide_qrs", False)
+        urgency = classification.get("clinical_urgency", "ROUTINE")
+
+        kcd_code, kcd_desc = get_primary_kcd_code(
+            primary_findings, stemi_suspected, stemi_region, mi_prob, wide_qrs
+        )
+
+        # Inject KCD code into prompt
         user_prompt = self.build_clinical_prompt(features, classification, patient_info)
+        user_prompt += f"\n\n[규칙 기반 진단 코드]\nKCD-10: {kcd_code}\n설명: {kcd_desc}\n응급도: {urgency}\n\n위의 코드, 설명, 응급도를 기반으로 보고서를 작성하세요."
 
         payload = {
             "model": self.model_name,
@@ -188,7 +224,7 @@ class OllamaEKGClient:
             "stream": False,
             "options": {
                 "temperature": 0.1,
-                "num_predict": 200,
+                "num_predict": 250,
             }
         }
 
@@ -199,10 +235,15 @@ class OllamaEKGClient:
                 data = res.json()
                 raw_json_str = data.get("response", "{}").strip()
                 parsed = json.loads(raw_json_str)
+                # Ensure KCD code comes from rules, not LLM
+                parsed["kcd_code"] = kcd_code
+                parsed["urgency"] = urgency
                 parsed["disclaimer"] = MANDATORY_DISCLAIMER
                 return parsed
         except Exception as e:
             return {
+                "kcd_code": kcd_code,
+                "urgency": urgency,
                 "error": str(e),
                 "disclaimer": MANDATORY_DISCLAIMER
             }
