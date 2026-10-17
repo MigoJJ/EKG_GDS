@@ -10,6 +10,9 @@ data/
 # Model weights (large binaries, ~35MB each)
 *.pt
 *.onnx
+# Exception: production model tracked for reproducibility
+!models/ecg_resnet18_11class.onnx
+!models/clinical_cutoffs.json
 
 # Logs
 *.log
