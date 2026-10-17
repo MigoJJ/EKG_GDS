@@ -1,0 +1,37 @@
+{
+  "metadata": {
+    "version": "1.2.0",
+    "updated_at": "2026-10-15",
+    "tuning_dataset": "PTB-XL Fold 9 (Validation, 2183 records)",
+    "evaluation_dataset": "PTB-XL Fold 10 (Test, 2198 records)",
+    "strategy": "Conditional Cut-off Tuning + Clinical Action Rules"
+  },
+  "cutoffs": {
+    "NORM": 0.5000,
+    "MI": 0.1057,
+    "AFIB": 0.1500,
+    "PVC": 0.3000,
+    "PAC": 0.0113,
+    "1AVB": 0.0641,
+    "RBBB": 0.4136,
+    "LBBB": 0.5000,
+    "LAFB": 0.4556,
+    "LVH": 0.0669,
+    "STTC": 0.3020
+  },
+  "clinical_action_rules": {
+    "PAC": "참고 소견 (PPV 8.3%로 낮아 경보 배제 및 참고 소견으로만 분류)",
+    "LVH": "참고 소견 (PPV 28.8%, Sokolow-Lyon 전압 지표와 함께 참고 소견으로 분류)",
+    "LAFB": "하이브리드 OR 룰 (DL >= 0.4556 OR Axis <= -30.0도 LAD 적용 -> 민감도 86.6% 극대화)",
+    "MI": "URGENCY: EMERGENCY 유지 (PTB-XL 기준 MI 양성 시 응급도 최상위 유지)"
+  },
+  "performance_fold10": {
+    "macro_auc": 0.953,
+    "macro_sensitivity": 0.856,
+    "macro_specificity": 0.903,
+    "macro_ppv": 0.591,
+    "macro_npv": 0.976,
+    "lafb_hybrid_or_sensitivity": 0.866,
+    "lafb_hybrid_or_specificity": 0.915
+  }
+}

@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+
+# Data (symlink to external dataset)
+data/
+
+# Model weights (large binaries, ~35MB each)
+*.pt
+*.onnx
+
+# Logs
+*.log
