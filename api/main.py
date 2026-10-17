@@ -673,3 +673,391 @@ async def get_security_status(request: Request):
         "api_keys_active": len([k for k in api_key_manager.keys.values() if k.active]),
         "security_headers_enabled": True,
     }
+
+
+# ============================================================================
+# Phase 5 Step 4: Input Format Expansion (DICOM, HL7, SCP-ECG)
+# ============================================================================
+
+from fastapi import UploadFile, File, Form
+import io
+from pipeline.dicom_parser import DicomParser
+from pipeline.hl7_parser import HL7Parser
+from pipeline.scp_parser import SCPParser
+
+
+@app.post("/api/v1/ecg/analyze-dicom", response_model=ECGAnalysisResponse, tags=["Analysis", "Phase 5 Step 4"])
+async def analyze_dicom(
+    file: UploadFile = File(..., description="DICOM file with embedded ECG waveform"),
+    output_format: str = Form("narrative", description="Output format: 'narrative', 'json', 'both', or 'none'"),
+):
+    """
+    Analyze ECG from DICOM file (medical imaging format).
+
+    DICOM is the standard format in hospital imaging systems.
+    ECG waveforms can be embedded in DICOM Waveform (0x5400) modules.
+
+    Args:
+        file: DICOM file (*.dcm)
+        output_format: Report format
+
+    Returns:
+        Standard ECGAnalysisResponse with patient demographics from DICOM
+    """
+    global classifier, extractor, ollama
+
+    if classifier is None or ollama is None:
+        raise HTTPException(status_code=503, detail="AI engine not ready")
+
+    try:
+        # Save uploaded file to temp
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".dcm", delete=False) as tmp:
+            content = await file.read()
+            tmp.write(content)
+            tmp_path = tmp.name
+
+        # Parse DICOM
+        try:
+            parser = DicomParser(tmp_path)
+            is_valid, error = parser.validate()
+            if not is_valid:
+                raise ValueError(error)
+
+            # Extract signal
+            signal = parser.extract_ecg_signal()
+            if signal is None:
+                raise ValueError("No ECG waveform found in DICOM")
+
+            # Ensure shape (samples, 12)
+            if signal.shape[0] == 12:
+                signal = signal.T
+
+            # Extract patient info from DICOM
+            dicom_patient = parser.extract_patient_info()
+            patient_age = None
+            patient_sex = "M"
+
+            if 'age' in dicom_patient:
+                try:
+                    patient_age = float(dicom_patient['age'].rstrip('Y'))
+                except ValueError:
+                    pass
+
+            if 'sex' in dicom_patient:
+                patient_sex = dicom_patient['sex']
+
+            # Run analysis using existing pipeline
+            t_total_start = time.perf_counter()
+
+            t0 = time.perf_counter()
+            feats = extractor.extract_features(
+                signal,
+                patient_sex=patient_sex,
+                patient_age=patient_age
+            )
+            fe_latency = (time.perf_counter() - t0) * 1000.0
+
+            t0 = time.perf_counter()
+            cls_res = classifier.predict(
+                signal,
+                heart_axis_deg=feats.get("heart_axis_deg"),
+                stemi_suspected=feats.get("stemi_suspected", False),
+                stemi_region=feats.get("stemi_region")
+            )
+            dl_latency = (time.perf_counter() - t0) * 1000.0
+
+            patient_info = {
+                "age": patient_age,
+                "sex": patient_sex,
+                "symptoms": "DICOM ECG 분석",
+                **dicom_patient
+            }
+
+            narrative_report = None
+            structured_json = None
+            ollama_latency = 0.0
+
+            if output_format in ["narrative", "both"]:
+                t0 = time.perf_counter()
+                narrative_report = ollama.generate_narrative_report(feats, cls_res, patient_info)
+                ollama_latency += (time.perf_counter() - t0) * 1000.0
+
+            if output_format in ["json", "both"]:
+                t0 = time.perf_counter()
+                structured_json = ollama.generate_structured_json(feats, cls_res, patient_info)
+                ollama_latency += (time.perf_counter() - t0) * 1000.0
+
+            total_latency = (time.perf_counter() - t_total_start) * 1000.0
+
+            return ECGAnalysisResponse(
+                status="success",
+                patient_info=patient_info,
+                quantitative_features=FeatureExtractionResponse(**feats),
+                deep_learning_classification=ClassificationResponse(**cls_res),
+                ollama_narrative_report=narrative_report,
+                emr_structured_json=structured_json,
+                latency_ms={
+                    "feature_extraction_ms": round(fe_latency, 2),
+                    "dl_inference_ms": round(dl_latency, 2),
+                    "ollama_generation_ms": round(ollama_latency, 2),
+                    "total_ms": round(total_latency, 2),
+                },
+                disclaimer=MANDATORY_DISCLAIMER,
+            )
+
+        finally:
+            import os
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"DICOM parsing error: {str(e)}")
+
+
+@app.post("/api/v1/ecg/analyze-hl7", response_model=ECGAnalysisResponse, tags=["Analysis", "Phase 5 Step 4"])
+async def analyze_hl7(
+    message: str = Form(..., description="HL7 v2.5 message (multiline text)"),
+    signal: Optional[str] = Form(None, description="Optional: JSON array of signal [[...], [...], ...]"),
+    output_format: str = Form("narrative", description="Output format"),
+):
+    """
+    Analyze ECG with HL7 v2.5 patient demographics.
+
+    HL7 is the standard message format for hospital information systems (EMR).
+    This endpoint parses HL7 patient demographics and ECG measurements.
+
+    Args:
+        message: HL7 v2.5 message (segments separated by newlines)
+        signal: Optional 12-lead ECG signal as JSON array
+        output_format: Report format
+
+    Returns:
+        ECGAnalysisResponse with HL7 patient info
+    """
+    global classifier, extractor, ollama
+
+    if classifier is None or ollama is None:
+        raise HTTPException(status_code=503, detail="AI engine not ready")
+
+    try:
+        # Parse HL7
+        parser = HL7Parser(message)
+        is_valid, error = parser.validate()
+        if not is_valid:
+            raise ValueError(f"Invalid HL7: {error}")
+
+        # Extract patient info and ECG data
+        hl7_patient = parser.get_patient_info()
+        hl7_ecg = parser.get_ecg_data()
+
+        # Get signal from request
+        if signal is None:
+            raise ValueError("ECG signal required (12-lead array)")
+
+        import json
+        sig = np.array(json.loads(signal), dtype=np.float32)
+
+        # Ensure shape (samples, 12)
+        if sig.shape[0] == 12:
+            sig = sig.T
+
+        # Parse patient demographics
+        patient_age = None
+        patient_sex = "M"
+
+        if 'age' in hl7_patient:
+            try:
+                patient_age = int(hl7_patient['age'])
+            except ValueError:
+                pass
+
+        if 'sex' in hl7_patient:
+            patient_sex = hl7_patient['sex']
+
+        # Run analysis
+        t_total_start = time.perf_counter()
+
+        t0 = time.perf_counter()
+        feats = extractor.extract_features(sig, patient_sex=patient_sex, patient_age=patient_age)
+        fe_latency = (time.perf_counter() - t0) * 1000.0
+
+        t0 = time.perf_counter()
+        cls_res = classifier.predict(
+            sig,
+            heart_axis_deg=feats.get("heart_axis_deg"),
+            stemi_suspected=feats.get("stemi_suspected", False),
+            stemi_region=feats.get("stemi_region")
+        )
+        dl_latency = (time.perf_counter() - t0) * 1000.0
+
+        patient_info = {
+            "age": patient_age,
+            "sex": patient_sex,
+            "symptoms": "HL7 ECG 분석",
+            **hl7_patient
+        }
+
+        narrative_report = None
+        structured_json = None
+        ollama_latency = 0.0
+
+        if output_format in ["narrative", "both"]:
+            t0 = time.perf_counter()
+            narrative_report = ollama.generate_narrative_report(feats, cls_res, patient_info)
+            ollama_latency += (time.perf_counter() - t0) * 1000.0
+
+        if output_format in ["json", "both"]:
+            t0 = time.perf_counter()
+            structured_json = ollama.generate_structured_json(feats, cls_res, patient_info)
+            ollama_latency += (time.perf_counter() - t0) * 1000.0
+
+        total_latency = (time.perf_counter() - t_total_start) * 1000.0
+
+        return ECGAnalysisResponse(
+            status="success",
+            patient_info=patient_info,
+            quantitative_features=FeatureExtractionResponse(**feats),
+            deep_learning_classification=ClassificationResponse(**cls_res),
+            ollama_narrative_report=narrative_report,
+            emr_structured_json=structured_json,
+            latency_ms={
+                "feature_extraction_ms": round(fe_latency, 2),
+                "dl_inference_ms": round(dl_latency, 2),
+                "ollama_generation_ms": round(ollama_latency, 2),
+                "total_ms": round(total_latency, 2),
+            },
+            disclaimer=MANDATORY_DISCLAIMER,
+        )
+
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"HL7 parsing error: {str(e)}")
+
+
+@app.post("/api/v1/ecg/analyze-scp", response_model=ECGAnalysisResponse, tags=["Analysis", "Phase 5 Step 4"])
+async def analyze_scp(
+    file: UploadFile = File(..., description="SCP-ECG file from ECG device"),
+    output_format: str = Form("narrative", description="Output format: 'narrative', 'json', 'both', or 'none'"),
+):
+    """
+    Analyze ECG from SCP-ECG file (direct medical device output).
+
+    SCP-ECG is the standard format for ECG export from medical devices.
+    Contains waveform data, patient demographics, and interpretations.
+
+    Args:
+        file: SCP-ECG file (binary format)
+        output_format: Report format
+
+    Returns:
+        Standard ECGAnalysisResponse with patient demographics from SCP
+    """
+    global classifier, extractor, ollama
+
+    if classifier is None or ollama is None:
+        raise HTTPException(status_code=503, detail="AI engine not ready")
+
+    try:
+        # Save uploaded file to temp
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".scp", delete=False) as tmp:
+            content = await file.read()
+            tmp.write(content)
+            tmp_path = tmp.name
+
+        # Parse SCP-ECG
+        try:
+            parser = SCPParser(tmp_path)
+            is_valid, error = parser.validate()
+            if not is_valid:
+                raise ValueError(error)
+
+            # Extract signal
+            signal = parser.extract_ecg_signal()
+            if signal is None:
+                raise ValueError("No ECG waveform found in SCP-ECG file")
+
+            # Ensure shape (samples, 12)
+            if signal.shape[0] == 12:
+                signal = signal.T
+
+            # Extract patient info
+            scp_patient = parser.extract_patient_info()
+            patient_age = None
+            patient_sex = "M"
+
+            if 'date_of_birth' in scp_patient:
+                # Calculate age from DOB if available
+                try:
+                    from datetime import datetime
+                    dob = datetime.strptime(scp_patient['date_of_birth'], '%Y-%m-%d')
+                    today = datetime.now()
+                    patient_age = today.year - dob.year - ((today.month, today.day) < (dob.month, dob.day))
+                except Exception:
+                    pass
+
+            if 'sex' in scp_patient:
+                patient_sex = scp_patient['sex']
+
+            # Run analysis
+            t_total_start = time.perf_counter()
+
+            t0 = time.perf_counter()
+            feats = extractor.extract_features(sig, patient_sex=patient_sex, patient_age=patient_age)
+            fe_latency = (time.perf_counter() - t0) * 1000.0
+
+            t0 = time.perf_counter()
+            cls_res = classifier.predict(
+                signal,
+                heart_axis_deg=feats.get("heart_axis_deg"),
+                stemi_suspected=feats.get("stemi_suspected", False),
+                stemi_region=feats.get("stemi_region")
+            )
+            dl_latency = (time.perf_counter() - t0) * 1000.0
+
+            patient_info = {
+                "age": patient_age,
+                "sex": patient_sex,
+                "symptoms": "SCP-ECG 분석",
+                **scp_patient
+            }
+
+            narrative_report = None
+            structured_json = None
+            ollama_latency = 0.0
+
+            if output_format in ["narrative", "both"]:
+                t0 = time.perf_counter()
+                narrative_report = ollama.generate_narrative_report(feats, cls_res, patient_info)
+                ollama_latency += (time.perf_counter() - t0) * 1000.0
+
+            if output_format in ["json", "both"]:
+                t0 = time.perf_counter()
+                structured_json = ollama.generate_structured_json(feats, cls_res, patient_info)
+                ollama_latency += (time.perf_counter() - t0) * 1000.0
+
+            total_latency = (time.perf_counter() - t_total_start) * 1000.0
+
+            return ECGAnalysisResponse(
+                status="success",
+                patient_info=patient_info,
+                quantitative_features=FeatureExtractionResponse(**feats),
+                deep_learning_classification=ClassificationResponse(**cls_res),
+                ollama_narrative_report=narrative_report,
+                emr_structured_json=structured_json,
+                latency_ms={
+                    "feature_extraction_ms": round(fe_latency, 2),
+                    "dl_inference_ms": round(dl_latency, 2),
+                    "ollama_generation_ms": round(ollama_latency, 2),
+                    "total_ms": round(total_latency, 2),
+                },
+                disclaimer=MANDATORY_DISCLAIMER,
+            )
+
+        finally:
+            import os
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"SCP-ECG parsing error: {str(e)}")
