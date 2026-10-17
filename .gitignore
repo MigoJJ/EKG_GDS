@@ -13,3 +13,7 @@ data/
 
 # Logs
 *.log
+
+# Kaggle bundles and candidate training runs
+dist/
+models/candidates/
