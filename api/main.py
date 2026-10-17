@@ -32,6 +32,9 @@ from config.security import (
     CORS_ALLOWED_ORIGINS, AUTH_EXEMPT_PATHS, REQUIRE_AUTH,
     RATE_LIMIT_IP_PER_MINUTE, SECURITY_HEADERS, ENVIRONMENT
 )
+from models.audit_logger import audit_logger
+from api.audit_routes import router as audit_router
+import uuid
 
 
 # Global singleton pipeline components
@@ -84,6 +87,9 @@ app.add_middleware(
 )
 
 STATIC_INDEX = Path(__file__).parent.parent / "static" / "index.html"
+
+# Include audit routes (Phase 5 Step 3)
+app.include_router(audit_router)
 
 
 # ============================================================================
