@@ -1,5 +1,10 @@
 # 12-Lead EKG AI Reading Assistant & EMR Integration
 
+Resume this session with:
+claude --resume 5e393f82-e586-4fa3-99fe-9a581dccb198
+
+To resume this session: gemini --resume 57f2afde-9ca8-4995-b604-3db2cd4de762    
+
 **Latest Version:** Phase 3 Complete (2026-10-17)  
 **Model Performance (Fold 10):** Macro AUC 0.9485, Macro AUPRC 0.7283  
 **Deployed Model:** `models/ecg_resnet18_11class.onnx` (Kaggle GPU trained, Focal Loss γ=2.0)
@@ -38,7 +43,7 @@ See `models/candidates/kaggle_run1/` for detailed metrics and training artifacts
 
 ### 1. Launch the FastAPI Backend Service
 ```bash
-cd /home/migowj/ekg-assistant
+        cd /home/migowj/ekg-assistant
 ./run_server.sh
 ```
 - Interactive API Documentation: **http://localhost:8000/docs** (Swagger UI)
@@ -116,3 +121,4 @@ PYTHONPATH=. .venv/bin/python demo_full_pipeline.py
 ## Java EMR Integration
 
 See [EMR_JAVA_INTEGRATION.md](EMR_JAVA_INTEGRATION.md) for ready-to-use Java service classes (`EkgAiService.java`) and JavaFX asynchronous UI wiring for Eclipse `GDSEMREKG`.
+# EKG_GDS
